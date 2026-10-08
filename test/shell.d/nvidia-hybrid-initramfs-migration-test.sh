@@ -30,7 +30,17 @@ cat >"$stub_bin/limine-mkinitcpio" <<'SH'
 #!/bin/bash
 
 echo 'limine-mkinitcpio' >>"$TEST_LOG"
+if [[ ${LIMINE_MKINITCPIO_STATUS:-0} -eq 0 ]]; then
+  mkdir -p "$(dirname "$LIMINE_UKI_PATH")"
+  printf '%s\n' "$LIMINE_IMAGE_LISTING" >"$LIMINE_UKI_PATH"
+fi
 exit "${LIMINE_MKINITCPIO_STATUS:-0}"
+SH
+
+cat >"$stub_bin/lsinitcpio" <<'SH'
+#!/bin/bash
+
+cat -- "$1"
 SH
 
 chmod +x "$stub_bin"/*
@@ -62,11 +72,17 @@ write_pci_devices() {
 
 # The migration shells out to omarchy-hw-nvidia-only-display, so the real
 # helper from bin/ sits on PATH behind the stubs.
+uki_dir="$test_tmp/uki"
+clean_listing=$'usr/lib/firmware/nvidia/ad102/gsp/bootloader.bin.zst\nusr/lib/modules/kernel/drivers/gpu/drm/i915/i915.ko.zst'
+
 run_migration() {
   PATH="$stub_bin:$ROOT/bin:$PATH" \
     TEST_LOG="$calls" \
+    LIMINE_UKI_PATH="$uki_dir/omarchy_linux-omarchy.efi" \
+    LIMINE_IMAGE_LISTING="${LIMINE_IMAGE_LISTING:-$clean_listing}" \
     OMARCHY_MKINITCPIO_NVIDIA_CONF="$nvidia_conf" \
     OMARCHY_NVIDIA_REBUILD_MARKER="$rebuild_marker" \
+    OMARCHY_BOOT_UKI_DIR="$uki_dir" \
     OMARCHY_PCI_DEVICES_PATH="$test_tmp/devices" \
     bash -euo pipefail "$migration" >/dev/null 2>&1
 }
@@ -109,6 +125,27 @@ grep -Fxq 'limine-mkinitcpio' "$calls" || fail "a failed rebuild is retried on t
 [[ ! -e $nvidia_conf ]] || fail "the retry removes the drop-in again"
 [[ -f $rebuild_marker ]] || fail "the retry records the repair"
 pass "migration retries after a failed rebuild"
+
+# A rebuild that exits 0 without replacing the image must not record completion.
+# The drop-in is already gone, so leaving it gone would make the next run skip.
+rm -f "$rebuild_marker"
+write_nvidia_conf
+: >"$calls"
+if LIMINE_IMAGE_LISTING='usr/lib/modules/kernel/extramodules/nvidia.ko.zst' run_migration; then
+  fail "a skipped rebuild must fail the migration"
+fi
+
+[[ -f $nvidia_conf ]] || fail "a skipped rebuild restores the nvidia drop-in"
+[[ $(<"$nvidia_conf") == "$nvidia_conf_body" ]] || fail "the restored drop-in is intact"
+[[ ! -e $rebuild_marker ]] || fail "a skipped rebuild stays pending"
+pass "migration stays pending when the boot image still contains NVIDIA"
+
+: >"$calls"
+run_migration
+
+[[ ! -e $nvidia_conf ]] || fail "the retry after a skipped rebuild removes the drop-in"
+[[ -f $rebuild_marker ]] || fail "the retry after a skipped rebuild records the repair"
+pass "migration retries after a skipped rebuild"
 
 # NVIDIA-only desktop: the early load is what gives it KMS at the LUKS prompt.
 write_pci_devices 0x10de:0x030000

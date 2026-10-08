@@ -29,5 +29,35 @@ if ! sudo limine-mkinitcpio; then
   echo "Rebuilding the initramfs failed; restored $nvidia_conf so the migration retries" >&2
   exit 1
 fi
+
+# limine-mkinitcpio can return success after skipping a failed kernel build.
+# The previous image still contains the NVIDIA modules, and with the drop-in
+# gone the next run would exit successfully and never try again. Restore the
+# drop-in unless every current UKI omits those modules.
+uki_dir="${OMARCHY_BOOT_UKI_DIR:-/boot/EFI/Linux}"
+mapfile -d '' images < <(sudo find "$uki_dir" -maxdepth 1 -name 'omarchy_linux*.efi' -print0 2>/dev/null | sort -z)
+image_ok=0
+if ((${#images[@]} > 0)); then
+  image_ok=1
+  image=""
+  for image in "${images[@]}"; do
+    [[ -n $image ]] || continue
+    listing=$(sudo lsinitcpio "$image") || {
+      image_ok=0
+      break
+    }
+    if grep -E '/nvidia(_modeset|_uvm|_drm|_peermem)?\.ko' <<<"$listing" >/dev/null; then
+      image_ok=0
+      break
+    fi
+  done
+fi
+if ((image_ok == 0)); then
+  sudo install -m644 "$backup" "$nvidia_conf"
+  rm -f "$backup"
+  echo "Boot image still contains the NVIDIA driver, or none was found; restored $nvidia_conf so the migration retries" >&2
+  exit 1
+fi
+
 rm -f "$backup"
 sudo install -Dm644 /dev/null "$rebuild_marker"
